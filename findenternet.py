@@ -1,3 +1,7 @@
+# 原作者: LBG617 (https://gitee.com/LBG617/era-terminal)
+# 许可证: AGPL-3.0  (见 LICENSE)
+# 本项目基于 ERA 终端，衍生修改须保留本署名并遵循 AGPL-3.0。
+
 import requests as re
 from bs4 import BeautifulSoup
 import urllib.parse

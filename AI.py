@@ -1,3 +1,7 @@
+# 原作者: LBG617 (https://gitee.com/LBG617/era-terminal)
+# 许可证: AGPL-3.0  (见 LICENSE)
+# 本项目基于 ERA 终端，衍生修改须保留本署名并遵循 AGPL-3.0。
+
 import sys
 import os
 import json
@@ -264,14 +268,6 @@ class AIChat:
                         sys.stdout.flush()
 
                     tool_results = self._execute_tool_calls(message.tool_calls)
-
-                    if self._print_to_console:
-                        #for tr in tool_results:
-                            #result_preview = tr['content'][:300]
-                            #console.print(Markdown(f"📦 工具结果: {result_preview}")
-                            #if len(tr['content']) > 300:
-                            #    console.print(Markdown("...(结果已截断)")
-                        sys.stdout.flush()
 
                     self.messages.extend(tool_results)
 

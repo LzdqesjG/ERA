@@ -1,0 +1,26 @@
+# ERA 终端依赖
+# 安装: pip install -r requirements.txt
+# (Windows 下语音热键需以管理员权限运行)
+
+# ---- AI 对话 ----
+openai>=1.0.0
+
+# ---- 终端渲染 / 输入 ----
+rich
+prompt_toolkit
+
+# ---- 网络搜索 ----
+requests
+beautifulsoup4
+
+# ---- 日志 / 时间 ----
+GreatLogger
+arrow
+
+# ---- 语音输入 (FunASR) ----
+# 仅在启用语音功能 (open_voice=y) 时需要；无 GPU 可在 yvyin.py 改 device="cpu"
+sounddevice
+soundfile
+numpy
+keyboard
+funasr

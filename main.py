@@ -1,3 +1,6 @@
+# 原作者: LBG617 (https://gitee.com/LBG617/era-terminal)
+# 许可证: AGPL-3.0  (见 LICENSE)
+# 本项目基于 ERA 终端，衍生修改须保留本署名并遵循 AGPL-3.0。
 # ============================================================
 # ECA.py — ERA 终端简易命令行外壳
 # 功能：提供交互式命令行，支持文件读写、目录切换、列表、启动 AI 助手
@@ -165,32 +168,23 @@ while True:
         os.system(f"python {os.path.dirname(os.path.abspath(__file__))}\\coAI.py")
     
     elif first == "check":
-        impor_num = 11
-        impor = []
-        if look_import("openai"):
-            impor.append("openai")
-        if look_import("rich"):
-            impor.append("rich")
-        if look_import("requests"):
-            impor.append("requests")
-        if look_import("beautifulsoup4"):
-            impor.append("beautifulsoup4")
-        if look_import("prompt_toolkit"):
-            impor.append("prompt_toolkit")
-        if look_import("GreatLogger"):
-            impor.append("GreatLogger")
-        if look_import("arrow"):
-            impor.append("arrow")
-        if look_import("sounddevice"):
-            impor.append("sounddevice")
-        if look_import("soundfile"):
-            impor.append("soundfile")
-        if look_import("numpy"):
-            impor.append("numpy")
-        if look_import("keyboard"):
-            impor.append("keyboard")
-        if len(impor) == impor_num:
-            print("\033[92m所有模块已安装\033[0m")
+        # 需要检查的全部依赖（含语音所需的 funasr）
+        required = [
+            "openai", "rich", "requests", "beautifulsoup4",
+            "prompt_toolkit", "GreatLogger", "arrow",
+            "sounddevice", "soundfile", "numpy", "keyboard", "funasr",
+        ]
+        installed = []
+        missing = []
+        for m in required:
+            # look_import 返回 True=已安装(含自动安装成功)，False=安装失败
+            if look_import(m):
+                installed.append(m)
+            else:
+                missing.append(m)
+        if not missing:
+            print(f"\033[92m所有模块已安装（{len(installed)}/{len(required)}）\033[0m")
         else:
-            print(f"缺失模块：{impor}")
+            print(f"\033[91m缺失模块：{missing}\033[0m")
+            print(f"\033[92m已安装：{installed}\033[0m")
        

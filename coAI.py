@@ -1,3 +1,7 @@
+# 原作者: LBG617 (https://gitee.com/LBG617/era-terminal)
+# 许可证: AGPL-3.0  (见 LICENSE)
+# 本项目基于 ERA 终端，衍生修改须保留本署名并遵循 AGPL-3.0。
+
 import os
 import sys
 
@@ -161,6 +165,9 @@ def load_config():
             "ai_url": "https://api.deepseek.com",
             "stream_output": True,
             "deep_thinking": True,
+            "AItool_path": "",
+            "open_voice": "",
+            "notes_path": "",
         }
         with open("AIconfig.json", "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
@@ -855,8 +862,6 @@ if __name__ == "__main__":
             elif user_input == "/update":
                 print("\n🔄 正在更新 (git pull --ff-only)，请稍候...")
                 log.info("用户请求执行更新")
-                with lock:
-                    pass  # 占位，确保和其他操作互斥（pull 过程不与 AI.chat 抢资源，避免同时改文件）
                 result = do_update()
                 log.info(f"[更新结果] {result}")
                 print(result)

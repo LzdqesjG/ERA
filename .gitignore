@@ -13,3 +13,6 @@ Thumbs.db
 # 用户数据
 *.json
 *.wav
+# 虚拟环境
+.venv/
+.venv/*
