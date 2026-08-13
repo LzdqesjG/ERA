@@ -1,0 +1,15 @@
+# 依赖目录
+__pycache__/
+# 构建产物
+dist/
+build/
+# 日志与环境变量
+*.log
+.env
+# 系统与编辑器文件
+.DS_Store
+Thumbs.db
+.vscode/
+# 用户数据
+*.json
+*.wav
