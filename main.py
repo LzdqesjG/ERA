@@ -166,6 +166,10 @@ while True:
         #       如果后续要打成 exe 单文件部署，这里需要改成 import 方式直接调 coAI 入口
         #       （避免 exe 里再去找 python + coAI.py 物理文件）
         os.system(f"python {os.path.dirname(os.path.abspath(__file__))}\\coAI.py")
+
+    # ===== 命令 6：web 以网页模式启动 coAI.py（启动即进 web 模式）=====
+    elif first == "web":
+        os.system(f"python {os.path.dirname(os.path.abspath(__file__))}\\coAI.py --web")
     
     elif first == "check":
         # 需要检查的全部依赖（含语音所需的 funasr）

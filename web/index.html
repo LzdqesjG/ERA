@@ -1,0 +1,131 @@
+<!-- 原作者: LBG617 (https://gitee.com/LBG617/era-terminal)
+     许可证: AGPL-3.0 (见 LICENSE) -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ERA 终端</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 左侧会话侧边栏 -->
+  <aside id="sidebar" class="sidebar collapsed">
+    <div class="sidebar-header">
+      <button id="sidebarToggle" class="icon-btn" title="展开/收起侧边栏">☰</button>
+      <button id="newConvBtn" class="new-btn" title="新建对话">＋ 新对话</button>
+    </div>
+    <div id="convList" class="conv-list">
+      <!-- 会话列表由 JS 渲染 -->
+    </div>
+    <div class="sidebar-footer">
+      <div id="balanceBar" class="balance-bar" style="display:none;">
+        <span class="balance-label">余额:</span>
+        <span id="balanceValue" class="balance-value">--</span>
+      </div>
+      <button id="settingsBtn" class="settings-btn" title="设置">⚙ 设置</button>
+    </div>
+  </aside>
+
+  <!-- 主体：头部 + 消息区 + 输入栏 -->
+  <div id="main" class="main">
+    <header>
+      <div class="header-left">
+        <button id="sidebarToggleHeader" class="icon-btn header-toggle" title="展开/收起侧边栏">☰</button>
+        <h1>ERA 终端</h1>
+      </div>
+      <div class="cmds">
+        <button onclick="sendCmd('/tools')">工具</button>
+        <button onclick="sendCmd('/condense')">压缩</button>
+        <button class="danger" onclick="sendCmd('/clear')">清空</button>
+        <button class="icon" id="themeBtn" onclick="toggleTheme()" title="切换深色/浅色模式">🌙</button>
+      </div>
+    </header>
+    <div id="msgbox"></div>
+    <div id="inputbar">
+      <textarea id="inp" placeholder="输入消息，回车发送（Shift+回车换行）" autofocus></textarea>
+      <button id="send" onclick="send()">发送</button>
+    </div>
+  </div>
+</div>
+
+<!-- 重命名弹窗 -->
+<div id="renameModal" class="modal-mask" style="display:none;">
+  <div class="modal">
+    <h3>重命名对话</h3>
+    <input id="renameInput" type="text" maxlength="50" placeholder="输入新的对话标题">
+    <div class="modal-actions">
+      <button onclick="closeRenameModal(false)">取消</button>
+      <button class="primary" onclick="closeRenameModal(true)">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div id="settingsModal" class="modal-mask" style="display:none;">
+  <div class="modal modal-wide">
+    <h3>⚙ 设置</h3>
+    <div id="settingsForm" class="settings-form">
+      <div class="field">
+        <label>API 密钥</label>
+        <input type="text" data-key="api_key" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label>模型名称</label>
+        <input type="text" data-key="model_name" placeholder="deepseek-v4-flash">
+      </div>
+      <div class="field">
+        <label>API 地址</label>
+        <input type="text" data-key="ai_url" placeholder="https://api.deepseek.com">
+      </div>
+      <div class="field-row">
+        <label class="checkbox">
+          <input type="checkbox" data-key="stream_output">
+          <span>流式输出</span>
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" data-key="deep_thinking">
+          <span>深度思考</span>
+        </label>
+      </div>
+      <div class="field">
+        <label>工具存放路径 <small>(改后需重启)</small></label>
+        <input type="text" data-key="AItool_path" placeholder="./UserFile/AItool">
+      </div>
+      <div class="field">
+        <label>笔记文件路径 <small>(改后需重启)</small></label>
+        <input type="text" data-key="notes_path" placeholder="./UserFile/AInotes/notes.md">
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label>网页端口 <small>(改后需重启)</small></label>
+          <input type="number" data-key="port" placeholder="8080">
+        </div>
+        <div class="field" style="flex:1">
+          <label>语音功能</label>
+          <select data-key="open_voice">
+            <option value="n">关闭</option>
+            <option value="y">开启</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>启动检查更新</label>
+        <select data-key="check_update">
+          <option value="n">关闭</option>
+          <option value="y">开启</option>
+        </select>
+      </div>
+    </div>
+    <div id="settingsNote" class="settings-note"></div>
+    <div class="modal-actions">
+      <button onclick="closeSettings(false)">取消</button>
+      <button class="primary" id="saveSettingsBtn" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

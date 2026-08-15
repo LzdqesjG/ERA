@@ -97,8 +97,6 @@ On first run, you will be prompted to configure:
 | `/condense` | Compress context (AI summarizes old conversation) |
 | `/save` | Save conversation history to file |
 | `/s` | Toggle voice input on/off |
-| `/key` | Modify API key |
-| `/config` | Modify tool path, voice, key, and other settings |
 | `/system <prompt>` | Temporarily modify the system prompt |
 | `/quit` | Exit the program |
 

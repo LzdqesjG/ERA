@@ -61,9 +61,12 @@ class AIChat:
         self.model_name = model_name
         self.messages = initial_messages
         self._print_to_console = True
+        self._print_tool_to_stdout = True  # 是否把 "🔧 调用工具" 打印到 stdout（web 模式下关闭，改走回调）
         self._stream_output = False
         self._deep_thinking = True
         self._tools = {}
+        self.on_tool_call = None  # 单个工具调用回调: fn(name, args_dict, result_str)
+        self.on_assistant_block = None  # 一轮回复回调: fn(reasoning, content, tool_calls_info)
 
     def add_tool(self, name, description, parameters, handler):
         """注册一个工具供AI调用
@@ -159,6 +162,7 @@ class AIChat:
 
     def _execute_tool_calls(self, tool_calls):
         tool_results = []
+        tool_calls_info = []  # 供 on_assistant_block 回调使用：[{name,args,result}, ...]
         for tool_call in tool_calls:
             call_id = tool_call.id
             func_name = tool_call.function.name
@@ -175,19 +179,33 @@ class AIChat:
             else:
                 result = f"工具 {func_name} 不存在"
 
+            # 单个工具调用回调（保留兼容）
+            if self.on_tool_call:
+                try:
+                    self.on_tool_call(func_name, func_args, str(result))
+                except Exception:
+                    pass
+
+            tool_calls_info.append({
+                "name": func_name,
+                "args": func_args,
+                "result": str(result)
+            })
+
             tool_results.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": str(result)
             })
-        return tool_results
+        return tool_results, tool_calls_info
 
     def chat(self, user_input=None):
         if user_input:
             self.messages.append({'role': 'user', 'content': user_input})
 
         has_tools = len(self._tools) > 0
-        stream = self._stream_output and not has_tools
+        # 有工具时也允许流式：流式期间积累 tool_call delta，结束后统一处理
+        stream = bool(self._stream_output)
         reasoning_effort = "high" if self._deep_thinking else None
         extra_body = {"thinking": {"type": "enabled"}} if self._deep_thinking else None
 
@@ -211,28 +229,112 @@ class AIChat:
                 reasoning_content = ""
                 content = ""
                 last_delta = False
+                # 流式积累 tool_calls：按 index 并行积累多个工具调用
+                # 每个元素 {"id": str, "function": {"name": str, "arguments": str}}
+                tc_accum = []
                 for chunk in response:
                     delta = chunk.choices[0].delta
+                    # 工具调用 delta（静默积累，不打印到终端）
+                    if hasattr(delta, "tool_calls") and delta.tool_calls:
+                        for d_tc in delta.tool_calls:
+                            try:
+                                idx = int(d_tc.index)
+                            except Exception:
+                                idx = 0
+                            while len(tc_accum) <= idx:
+                                tc_accum.append({"id": "", "type": "function",
+                                                 "function": {"name": "", "arguments": ""}})
+                            if getattr(d_tc, "id", None):
+                                tc_accum[idx]["id"] = d_tc.id
+                            fn = getattr(d_tc, "function", None)
+                            if fn is not None:
+                                if getattr(fn, "name", None):
+                                    tc_accum[idx]["function"]["name"] += fn.name
+                                if getattr(fn, "arguments", None):
+                                    tc_accum[idx]["function"]["arguments"] += fn.arguments
+                        continue
                     if delta.reasoning_content:
                         reasoning_content += delta.reasoning_content
                         if self._print_to_console:
-                            _safe_print(Markdown(f"\033[91m{delta.reasoning_content}\033[0m", end=""))
+                            # 流式碎片直接写纯文本：Markdown 块级渲染会给每个碎片加换行
+                            sys.stdout.write(f"\033[91m{delta.reasoning_content}\033[0m")
                             sys.stdout.flush()
                         last_delta = False
                     elif delta.content:
                         if not last_delta and reasoning_content:
                             if self._print_to_console:
-                                _safe_print(Markdown("\n--------------------"))
+                                sys.stdout.write("\n--------------------\n")
                                 sys.stdout.flush()
                         content += delta.content
                         if self._print_to_console:
-                            _safe_print(Markdown(f"\033[94m{delta.content}\033[0m", end=""))
+                            sys.stdout.write(f"\033[94m{delta.content}\033[0m")
                             sys.stdout.flush()
                         last_delta = True
                 if self._print_to_console:
-                    _safe_print(Markdown("\n--------------------"))
+                    sys.stdout.write("\n--------------------\n")
                     sys.stdout.flush()
 
+                # --- 流式结束：判断是否有工具调用 ---
+                tc_valid = [t for t in tc_accum if t["function"]["name"]]
+                if tc_valid:
+                    # 构造并追加带 tool_calls 的 assistant 消息
+                    assistant_msg = {
+                        "role": "assistant",
+                        "content": content or "",
+                        "tool_calls": [
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": tc["function"]
+                            }
+                            for tc in tc_valid
+                        ]
+                    }
+                    self.messages.append(assistant_msg)
+                    if reasoning_content:
+                        assistant_msg["reasoning_content"] = reasoning_content
+
+                    # 把流式积累的 tool_calls 包装成可执行对象
+                    class _FakeTC:
+                        def __init__(self, data):
+                            self.id = data["id"]
+                            self.function = _FakeFunc(data["function"])
+                    class _FakeFunc:
+                        def __init__(self, f):
+                            self.name = f["name"]
+                            self.arguments = f["arguments"]
+                    fake_tcs = [_FakeTC(tc) for tc in tc_valid]
+                    tool_results, tool_calls_info = self._execute_tool_calls(fake_tcs)
+                    self.messages.extend(tool_results)
+
+                    # web 模式：一轮回复（content + 工具调用）作为完整消息块推送
+                    if self.on_assistant_block:
+                        try:
+                            self.on_assistant_block(reasoning_content, content or "", tool_calls_info)
+                        except Exception:
+                            pass
+                    elif self._print_to_console:
+                        if self._print_tool_to_stdout:
+                            for tc in tc_valid:
+                                print(f"\n🔧 调用工具: {tc['function']['name']}({tc['function']['arguments']})", flush=True)
+                        sys.stdout.flush()
+
+                    # 准备下一轮请求：执行工具后继续对话（仍流式）
+                    api_messages = self._build_api_messages()
+                    request_kwargs = {
+                        "model": self.model_name,
+                        "messages": api_messages,
+                        "stream": True,
+                        "reasoning_effort": reasoning_effort,
+                    }
+                    if extra_body:
+                        request_kwargs["extra_body"] = extra_body
+                    if has_tools:
+                        request_kwargs["tools"] = self._get_tools_schema()
+                    response = self.client.chat.completions.create(**request_kwargs)
+                    continue
+
+                # 无工具调用：正常保存并返回
                 self.messages.append({
                     "role": "assistant",
                     "reasoning_content": reasoning_content,
@@ -260,16 +362,28 @@ class AIChat:
                     }
                     self.messages.append(assistant_msg)
 
-                    if self._print_to_console:
-                        if message.content:
-                            _safe_print(Markdown(message.content))
-                        for tc in message.tool_calls:
-                            _safe_print(Markdown(f"\n🔧 调用工具: {tc.function.name}({tc.function.arguments})"))
-                        sys.stdout.flush()
+                    # 取本轮 reasoning（DeepSeek 思考过程，中间轮也可能有）
+                    block_reasoning = ""
+                    if hasattr(message, 'reasoning_content'):
+                        block_reasoning = message.reasoning_content or ""
 
-                    tool_results = self._execute_tool_calls(message.tool_calls)
+                    tool_results, tool_calls_info = self._execute_tool_calls(message.tool_calls)
 
                     self.messages.extend(tool_results)
+
+                    # web 模式：一轮回复（content + 工具调用）作为完整消息块推送，不走 stdout
+                    if self.on_assistant_block:
+                        try:
+                            self.on_assistant_block(block_reasoning, message.content or "", tool_calls_info)
+                        except Exception:
+                            pass
+                    elif self._print_to_console:
+                        if message.content:
+                            _safe_print(Markdown(message.content))
+                        if self._print_tool_to_stdout:
+                            for tc in message.tool_calls:
+                                _safe_print(Markdown(f"\n🔧 调用工具: {tc.function.name}({tc.function.arguments})"))
+                        sys.stdout.flush()
 
                     api_messages = self._build_api_messages()
 
@@ -292,7 +406,13 @@ class AIChat:
                         reasoning_content = message.reasoning_content or ""
                     content = message.content or ""
 
-                    if self._print_to_console:
+                    # web 模式：最终回复也作为消息块推送（无工具调用）；否则走 stdout 打印
+                    if self.on_assistant_block:
+                        try:
+                            self.on_assistant_block(reasoning_content, content, [])
+                        except Exception:
+                            pass
+                    elif self._print_to_console:
                         if reasoning_content:
                             _safe_print(Markdown(f"\033[91m{reasoning_content}\033[0m"))
                             _safe_print(Markdown("--------------------"))
@@ -312,6 +432,24 @@ class AIChat:
             self._stream_output = bool(stream_output)
         if deep_thinking is not None:
             self._deep_thinking = bool(deep_thinking)
+
+    def reconfigure(self, api_key=None, model_name=None, base_url=None):
+        """热更新 API 接口信息：重建 OpenAI client，更新模型名。
+        传入 None 的字段保持不变。"""
+        if api_key:
+            self.client = OpenAI(api_key=api_key, base_url=base_url or self.client.base_url)
+        elif base_url:
+            # 仅改 base_url 也需重建 client
+            self.client = OpenAI(api_key=self._api_key_for_rebuild(), base_url=base_url)
+        if model_name:
+            self.model_name = model_name
+
+    def _api_key_for_rebuild(self):
+        """从现有 client 取 api_key（openai 客户端内部存储方式可能变化，做兜底）"""
+        try:
+            return self.client.api_key
+        except Exception:
+            return None
 
     def get_config(self):
         return {
@@ -342,7 +480,7 @@ class AIChat:
         self._tools = {}
 
         # 构建总结请求
-        summary_prompt = "请用中文简洁总结以下对话的关键信息，不超过300字，保留重要主题、决策和事实。\n\n"
+        summary_prompt = "请用中文简洁总结以下对话的关键信息，尽量不超过300字，保留重要主题、决策和事实。\n\n"
         for m in non_system[:-2]:
             role = "用户" if m.get("role") == "user" else "AI"
             content = m.get("content", "")

@@ -35,9 +35,24 @@ import os
 import sys
 import subprocess
 from datetime import datetime
-from findenternet import find_enternet
 import requests
 import json
+
+# 可选依赖：缺失时只跳过对应工具，不影响核心工具加载
+# （Windows 不支持 crypt；findenternet 依赖 bs4；easygui/lzdqesj 可能未安装）
+try:
+    from findenternet import find_enternet
+except Exception:
+    find_enternet = None
+try:
+    import lzdqesj
+except Exception:
+    lzdqesj = None
+try:
+    import easygui
+except Exception:
+    easygui = None
+
 config = {}
 try:
     with open("AIconfig.json", "r", encoding="utf-8") as f:
@@ -386,6 +401,63 @@ def remove_time_task_tool(args):
     except Exception as e:
         return f"删除定时任务出错: {e}"
 
+def _rickroll_tool(args):
+    """播放rickroll视频"""
+    # This tool is made by @lzdqesj
+    platform = args.get("type", "")
+    if not platform:
+        platform = "bilibili"
+    if platform not in ["youtube", "bilibili"]:
+        return f"❌ 错误: 未知的视频平台 {platform}"
+    lzdqesj.rickroll(platform)
+    return f"✅ 已打开位于 {platform} 的 Rickroll 视频。"
+
+def _get_notify_help_tool(kwargs):
+    """获取 easygui 库的方法列表或方法文档（根据 mode 参数）"""
+    if easygui is None:
+        return "❌ 错误: easygui 库未安装，无法获取帮助信息"
+    _mode = kwargs.get("mode", "")
+    if _mode == "list":
+        # 优先用 __all__，缺失时回退到扫描公开属性
+        methods = getattr(easygui, "__all__", None)
+        if not methods:
+            methods = [n for n in dir(easygui) if not n.startswith("_")]
+        return {
+            "msg": "✅ 已获取 easygui 库的方法列表",
+            "return": methods,
+        }
+    elif _mode == "doc":
+        _method = kwargs.get("method", "")
+        if not _method:
+            return "❌ 错误: mode=doc 时必须指定 method 参数"
+        if not hasattr(easygui, _method):
+            return f"❌ 错误: easygui 库中没有方法 {_method}"
+        doc = getattr(easygui, _method).__doc__
+        return {
+            "msg": f"✅ 已获取 easygui 库 {_method} 方法的文档",
+            "return": doc or f"(方法 {_method} 没有文档说明)"
+        }
+    else:
+        return f"❌ 错误: 未知的 mode '{_mode}'，支持 'list'(获取方法列表) 或 'doc'(获取方法文档)"
+
+
+
+def _show_notify_tool(kwargs):
+    """用 easygui 库显示弹窗"""
+    method = kwargs.get("method", "")
+    kwargs = kwargs.get("kwargs", {})
+    reval = None
+    if not method:
+        return "❌ 错误: 未指定 easygui 库中的方法名"
+    if not hasattr(easygui, method):
+        return f"❌ 错误: easygui 库中没有方法 {method}"
+    try:
+        reval = getattr(easygui, method)(**kwargs)
+    except Exception as e:
+        return f"❌ 错误: 调用 easygui 方法 {method} 时出错: {e}"
+    return f"✅ 已调用 easygui 方法 {method} 并传入参数 {kwargs} | 返回:\n{reval}"
+
+
 
 # ================================================
 # 工具注册入口 —— 所有工具在此汇总
@@ -393,7 +465,7 @@ def remove_time_task_tool(args):
 
 def get_tools():
     """返回所有工具的字典"""
-    return {
+    tools = {
         # --- 内置工具 ---
         "get_time": {
             "description": "获取当前系统时间",
@@ -477,17 +549,6 @@ def get_tools():
             "handler": find_file_tool,
         },
 
-        "find_from_enternet": {
-            "description": "在互联网上查找信息",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "ci": {"type": "string", "description": "要查找的关键词"}
-                },
-                "required": ["ci"],
-            },
-            "handler": find_enternet_tool,
-        },
         "see_enternet": {
             "description": "查看指定网址的内容",
             "parameters": {
@@ -572,5 +633,57 @@ def get_tools():
                 "required": ["index"],
             },
             "handler": remove_time_task_tool,
-        }
+        },
     }
+
+    # ===== 可选工具：依赖未安装时跳过，不影响核心工具加载 =====
+    if find_enternet is not None:
+        tools["find_from_enternet"] = {
+            "description": "在互联网上查找信息",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ci": {"type": "string", "description": "要查找的关键词"}
+                },
+                "required": ["ci"],
+            },
+            "handler": find_enternet_tool,
+        }
+    if lzdqesj is not None:
+        tools["rickroll"] = {
+            "description": "播放指定平台的 Rickroll 视频 (提示: 该功能可用于对用户说“你被骗了”或一些类似的情况)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string", "description": "传入视频平台名 (youtube / bilibili)"}
+                },
+                "required": [],
+            },
+            "handler": _rickroll_tool,
+        }
+    if easygui is not None:
+        tools["show_notify"] = {
+            "description": "用 easygui 库显示弹窗 (用于向用户弹出提示信息、选择框、输入框、确认框等弹窗)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string", "description": "easygui 库中的方法名"},
+                    "kwargs": {"type": "object", "description": "easygui 库中的方法参数"}
+                },
+                "required": ["method"],
+            },
+            "handler": _show_notify_tool,
+        }
+        tools["get_notify_help"] = {
+            "description": "获取 easygui 库的帮助信息",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "description": "查询模式：'list'(列出所有方法名) 或 'doc'(查指定方法文档)"},
+                    "method": {"type": "string", "description": "当 mode='doc' 时，指定要查询文档的方法名"}
+                },
+                "required": ["mode"],
+            },
+            "handler": _get_notify_help_tool,
+        }
+    return tools
