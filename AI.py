@@ -67,6 +67,10 @@ class AIChat:
         self._tools = {}
         self.on_tool_call = None  # 单个工具调用回调: fn(name, args_dict, result_str)
         self.on_assistant_block = None  # 一轮回复回调: fn(reasoning, content, tool_calls_info)
+        # 工具调用确认回调：fn(name, args_dict, need_accept) -> {"need_accept":bool, "auto_accept":bool, "reject_reason":str|None, "accept_hint":str|None}
+        # 实际调用：如果 need_accept 为 True 且 auto_accept 为 False，则调用阻塞等待直到批准/拒绝。
+        # 返回值: {"granted": bool, "reject_reason": str|None}
+        self.tool_acceptor_cb = None
 
     def add_tool(self, name, description, parameters, handler):
         """注册一个工具供AI调用
@@ -76,12 +80,15 @@ class AIChat:
             description: 工具描述，AI根据描述决定是否调用
             parameters: JSON Schema格式的参数定义，例如:
                 {"type": "object", "properties": {"query": {"type": "string", "description": "搜索内容"}}, "required": ["query"]}
-            handler: 可调用对象，接收一个dict参数，返回字符串结果
+            handler: 可调用对象，接收一个dict参数，返回字符串结果。
+                     若 handler 带有 `__tool_need_accept__ = True` 属性，则会在执行前触发人工确认。
         """
+        need_accept = bool(getattr(handler, "__tool_need_accept__", False))
         self._tools[name] = {
             "description": description,
             "parameters": parameters,
-            "handler": handler
+            "handler": handler,
+            "need_accept": need_accept,
         }
 
     def remove_tool(self, name):
@@ -172,6 +179,27 @@ class AIChat:
                 func_args = {}
 
             if func_name in self._tools:
+                tool_meta = self._tools[func_name]
+                need_accept = bool(tool_meta.get("need_accept", False))
+                # 1) 如果工具带 @tool_need_accept，先向确认器请求"是否允许执行"
+                if need_accept and self.tool_acceptor_cb is not None:
+                    try:
+                        decision = self.tool_acceptor_cb({
+                            "name": func_name,
+                            "args": func_args,
+                            "need_accept": True,
+                        })
+                    except Exception as e:
+                        decision = {"granted": False, "reject_reason": f"工具确认回调出错: {e}"}
+                    if not decision or not decision.get("granted", False):
+                        result = decision.get("reject_reason") if isinstance(decision, dict) else None
+                        if not result:
+                            result = "(用户手动取消了该工具调用请求)"
+                        # 生成拒绝结果，不执行 handler
+                        self._append_tool_result_and_info(tool_results, tool_calls_info,
+                                                           call_id, func_name, func_args, str(result))
+                        continue
+
                 try:
                     result = self._tools[func_name]["handler"](func_args)
                 except Exception as e:
@@ -179,25 +207,31 @@ class AIChat:
             else:
                 result = f"工具 {func_name} 不存在"
 
-            # 单个工具调用回调（保留兼容）
-            if self.on_tool_call:
-                try:
-                    self.on_tool_call(func_name, func_args, str(result))
-                except Exception:
-                    pass
-
-            tool_calls_info.append({
-                "name": func_name,
-                "args": func_args,
-                "result": str(result)
-            })
-
-            tool_results.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": str(result)
-            })
+            self._append_tool_result_and_info(tool_results, tool_calls_info,
+                                               call_id, func_name, func_args, str(result))
         return tool_results, tool_calls_info
+
+    def _append_tool_result_and_info(self, tool_results, tool_calls_info,
+                                      call_id, func_name, func_args, result_str):
+        """统一的追加工具结果+info（拒绝/批准两条路径都能走到）"""
+        # 单个工具调用回调（保留兼容）
+        if self.on_tool_call:
+            try:
+                self.on_tool_call(func_name, func_args, result_str)
+            except Exception:
+                pass
+
+        tool_calls_info.append({
+            "name": func_name,
+            "args": func_args,
+            "result": result_str,
+        })
+
+        tool_results.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": result_str,
+        })
 
     def chat(self, user_input=None):
         if user_input:

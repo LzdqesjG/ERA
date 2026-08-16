@@ -12,6 +12,12 @@
 <div id="app">
   <!-- 左侧会话侧边栏 -->
   <aside id="sidebar" class="sidebar collapsed">
+    <!-- 侧边栏顶部：用户信息（置顶） -->
+    <div id="sidebarUser" class="sidebar-user" style="display:none;">
+      <span class="user-avatar">👤</span>
+      <span class="user-name" id="userName">--</span>
+      <button id="logoutBtn" class="logout-btn" title="退出登录">退出</button>
+    </div>
     <div class="sidebar-header">
       <button id="sidebarToggle" class="icon-btn" title="展开/收起侧边栏">☰</button>
       <button id="newConvBtn" class="new-btn" title="新建对话">＋ 新对话</button>
@@ -123,6 +129,18 @@
       <button onclick="closeSettings(false)">取消</button>
       <button class="primary" id="saveSettingsBtn" onclick="saveSettings()">保存</button>
     </div>
+  </div>
+</div>
+
+<!-- 登录遮罩 -->
+<div id="loginOverlay" class="login-overlay" style="display:none;">
+  <div class="login-card">
+    <div class="login-logo">ERA 终端</div>
+    <div class="login-sub">请登录后使用</div>
+    <input id="loginUser" type="text" placeholder="用户名" autocomplete="username" maxlength="64">
+    <input id="loginPass" type="password" placeholder="密码" autocomplete="current-password" maxlength="128">
+    <div id="loginError" class="login-error"></div>
+    <button id="loginSubmit" class="login-submit" onclick="doLogin()">登 录</button>
   </div>
 </div>
 

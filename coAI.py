@@ -261,12 +261,28 @@ class ConversationManager:
             ]
 
     def current(self):
-        """返回当前会话的完整 payload（含 messages），无则自动创建一个"""
+        """返回当前会话的完整 payload（含 messages）；如当前无会话则返回 None。
+        不会为了"必须有一个"而自动创建空对话（避免启动即自动产生空对话文件）。"""
         with self._lock:
             if self._current_id and self._current_id in self._meta_cache:
                 return self._read_full(self._current_id)
-            # 否则创建默认会话
-            return self._create_locked(title="新对话")
+            return None
+
+    def ensure_current(self, title="新对话"):
+        """确保存在一个当前会话：如果还没有则新建一个。
+        用于「发送第一条消息」「保存」等真正需要会话的场景。"""
+        with self._lock:
+            if self._current_id and self._current_id in self._meta_cache:
+                return self._read_full(self._current_id)
+            return self._create_locked(title=title)
+
+    def current_id(self):
+        """安全地获取当前会话 id，无则返回 None。"""
+        with self._lock:
+            cid = self._current_id
+            if cid and cid in self._meta_cache:
+                return cid
+            return None
 
     def create(self, title="新对话", system_prompt=None):
         with self._lock:
@@ -350,10 +366,9 @@ class ConversationManager:
                         )
                         self._current_id = arr[0]["id"]
                     else:
-                        # 保持 _current_id 为空，下次 current() 会自动创建
+                        # 保持 _current_id 为空，不再自动创建空对话
+                        # 等用户真正发第一条消息时，再由 ensure_current() 创建
                         self._current_id = None
-                        # 确保还有一个默认会话
-                        self._create_locked(title="新对话")
                 return True
             except Exception as e:
                 log.error(f"删除会话失败: {e}")
@@ -363,6 +378,8 @@ class ConversationManager:
         """保存当前会话：把 ai.messages 写入当前会话文件并更新 updated_at"""
         with self._lock:
             if self._current_id is None:
+                # 用户已输入了实际内容（否则走到 save 时 ai.messages 还只有 system），
+                # 所以这里可以安全地确保会话存在（不会产生完全空的新对话文件）。
                 self._create_locked(title="新对话")
             conv_id = self._current_id
             now = self._now_dt()
@@ -386,9 +403,17 @@ class ConversationManager:
                 log.error(f"保存会话失败: {e}")
 
     def apply_current_to_ai(self, ai_instance):
-        """把当前会话 messages 加载到 ai_instance.messages（替换）"""
+        """把当前会话 messages 加载到 ai_instance.messages（替换）。
+        如果当前无会话，则只把默认 system prompt 装到 ai，不创建空对话文件。
+        返回：会话 payload；如果没有会话则返回 None。"""
         with self._lock:
-            conv = self.current()  # 若不存在则会自动创建
+            cid = self._current_id if self._current_id in self._meta_cache else None
+            if cid is None:
+                # 没有当前会话，不创建文件，仅给 AI 一个默认的 system prompt
+                default_msgs = self.default_system_prompt_fn() if callable(self.default_system_prompt_fn) else []
+                ai_instance.messages = list(default_msgs or [])
+                return None
+            conv = self._read_full(cid)
             ai_instance.messages = list(conv.get("messages") or [])
             return conv
 
@@ -408,6 +433,148 @@ class ConversationManager:
 
 # 会话管理器单例（__main__ 阶段初始化）
 _conv_manager = None  # type: ConversationManager | None
+
+
+# ============================================================
+# 工具调用确认管理器：AI 调用带 @tool_need_accept 装饰器的工具前会在此排队
+# - 请求 id = sha256(纳秒时间戳 + 随机串)
+# - 生成请求后把 {id, name, args, created_at} 写入 pending 集合 + 向 SSE 队列推送事件
+# - POST /api/accept_tool 批准/拒绝后用 Event 唤醒阻塞的 AI 线程
+# ============================================================
+class ToolAcceptManager:
+    def __init__(self, sse_queue=None, log=None):
+        self._lock = RLock()
+        self._pending = {}   # id -> {"request_id", "name", "args", "created_at", "event": Event,
+                             #          "state": "pending", "granted": bool, "reason": str|None}
+        self._history = {}   # id -> resolved info（短暂保留，前端确认后可清）
+        self._sse_queue = sse_queue
+        self._log = log
+
+    def _gen_request_id(self):
+        ts_ns = str(_time.time_ns())   # 最高精度时间戳（纳秒）
+        rand = _uuid.uuid4().hex + os.urandom(8).hex()
+        payload = f"{ts_ns}+{rand}".encode("utf-8")
+        import hashlib
+        return hashlib.sha256(payload).hexdigest()
+
+    def _emit_sse(self, payload):
+        if self._sse_queue is None:
+            return
+        try:
+            # 按现有 SSE 推送约定：用控制帧 "__ctl__" + type
+            import json as _json
+            msg = "__ctl__" + _json.dumps({"type": "tool_request", **payload},
+                                            ensure_ascii=False)
+            self._sse_queue.put(msg)
+        except Exception as e:
+            if self._log:
+                try: self._log.error(f"推送 tool_request SSE 失败: {e}")
+                except Exception: pass
+
+    def request(self, req):
+        """由 ai.tool_acceptor_cb 调用：阻塞等用户批准/拒绝。
+        req: {"name": str, "args": dict, "need_accept": True}
+        返回: {"granted": bool, "reject_reason": str|None}
+        """
+        rid = self._gen_request_id()
+        name = req.get("name", "?")
+        args = req.get("args") or {}
+        ev = Event()
+        with self._lock:
+            entry = {
+                "id": rid,
+                "name": name,
+                "args": args,
+                "created_at": _time.time_ns(),
+                "event": ev,
+                "state": "pending",
+                "granted": False,
+                "reason": None,
+            }
+            self._pending[rid] = entry
+        if self._log:
+            try: self._log.info(f"[ToolAccept] 请求 {rid[:12]}… 需要批准: {name}({args})")
+            except Exception: pass
+        self._emit_sse({
+            "id": rid, "name": name, "args": args,
+            "state": "pending", "created_at": entry["created_at"],
+        })
+
+        # 阻塞，直到 accept/revoke（带超时兜底，避免永久卡死）
+        timeout = 10 * 60  # 10 分钟默认超时
+        resolved = ev.wait(timeout=timeout)
+        with self._lock:
+            entry = self._pending.pop(rid, None)
+            if entry is None:
+                return {"granted": False, "reject_reason": "(工具调用请求状态丢失)"}
+            # 把结果存入 history 供前端短时间确认（保留 5 分钟）
+            self._history[rid] = {
+                "id": rid, "name": name, "args": args,
+                "created_at": entry["created_at"],
+                "resolved_at": _time.time_ns(),
+                "state": entry["state"],
+                "granted": entry["granted"],
+                "reason": entry.get("reason"),
+            }
+            # history 上限 200 条
+            if len(self._history) > 200:
+                oldest = sorted(self._history.keys())[: -200]
+                for k in oldest:
+                    self._history.pop(k, None)
+        if not resolved:
+            return {"granted": False, "reject_reason": "(等待用户批准超时，已自动取消该工具调用请求)"}
+        if not entry["granted"]:
+            return {"granted": False, "reject_reason": entry.get("reason") or "(用户手动取消了该工具调用请求)"}
+        return {"granted": True, "reject_reason": None}
+
+    def resolve(self, rid, state):
+        """POST /api/accept_tool 调用：state = accept / revoke"""
+        if state not in ("accept", "revoke"):
+            raise ValueError("state 必须为 accept 或 revoke")
+        with self._lock:
+            entry = self._pending.get(rid)
+            if entry is None:
+                # 可能已超时或被前端重复点击
+                return False
+            entry["state"] = "accepted" if state == "accept" else "revoked"
+            entry["granted"] = state == "accept"
+            if state == "revoke":
+                entry["reason"] = "(用户手动取消了该工具调用请求)"
+            ev = entry["event"]
+        self._emit_sse({
+            "id": rid,
+            "name": entry["name"],
+            "args": entry["args"],
+            "state": entry["state"],
+            "granted": entry["granted"],
+            "resolved_at": _time.time_ns(),
+        })
+        try: ev.set()
+        except Exception: pass
+        return True
+
+    def list_pending(self):
+        with self._lock:
+            arr = []
+            for v in self._pending.values():
+                arr.append({
+                    "id": v["id"],
+                    "name": v["name"],
+                    "args": v["args"],
+                    "created_at": v["created_at"],
+                    "state": v["state"],
+                })
+            arr.sort(key=lambda x: x["created_at"])
+            return arr
+
+    def list_resolved(self, since_ns=0):
+        with self._lock:
+            arr = [v for v in self._history.values() if v["resolved_at"] > since_ns]
+            arr.sort(key=lambda x: x["resolved_at"])
+            return arr
+
+
+_tool_accept_manager = None  # type: ToolAcceptManager | None
 
 
 def save_history(ai_instance):
@@ -1311,9 +1478,24 @@ if __name__ == "__main__":
         project_dir=os.path.dirname(os.path.abspath(__file__)),
         default_system_prompt_fn=lambda: load_history(_tool_path_for_prompt),
     )
-    # 以当前会话的 messages 作为 AIChat 初始消息
+    # 如果历史会话存在但当前未选中，则自动指向最新的一个（按更新时间）
+    # —— 用户重启程序后应该"接着上次最新的对话继续"，但不会为此新建空对话
+    with _conv_manager._lock:
+        _all = list(_conv_manager._meta_cache.values())
+        if _conv_manager._current_id not in _conv_manager._meta_cache and _all:
+            _all.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+            _conv_manager._current_id = _all[0]["id"]
+            log.info(f"恢复上次会话: {_conv_manager._current_id} ({_all[0].get('title','新对话')})")
+
+    # 以当前会话的 messages 作为 AIChat 初始消息；无会话时仅使用默认 system prompt
     current_conv = _conv_manager.current()
-    initial_messages = current_conv.get("messages") or load_history(_tool_path_for_prompt)
+    initial_messages = current_conv.get("messages") if current_conv and current_conv.get("messages") \
+        else load_history(_tool_path_for_prompt)
+
+    # ===== 工具调用确认管理器 =====
+    # 注意：此处为模块顶层作用域，直接赋值即可修改模块级变量，无需 global 声明。
+    # （如果写 global，会因为前面第577行已先赋值而触发 SyntaxError）
+    _tool_accept_manager = ToolAcceptManager(sse_queue=_web_output, log=log)
 
     ai = AI.AIChat(
         initial_messages=initial_messages,
@@ -1321,6 +1503,7 @@ if __name__ == "__main__":
         model_name=config["model_name"],
         base_url=config["ai_url"],
     )
+    ai.tool_acceptor_cb = lambda req: _tool_accept_manager.request(req)
     ai.update_config(
         print_to_console=True,
         stream_output=config.get("stream_output", True),
@@ -1375,6 +1558,7 @@ if __name__ == "__main__":
                 history_path=None,  # 会话模式下不再按单文件读取
                 conv_manager=_conv_manager,
                 config_path=_CONFIG_PATH,
+                tool_accept_manager=_tool_accept_manager,
             ),
             daemon=True,
         )

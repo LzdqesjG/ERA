@@ -231,7 +231,7 @@ ENGINE_SEARCHERS = {
 }
 
 
-def find_enternet(ci, num_results=10, engines=None, resolve_redirects=True, max_results=5):
+def find_internet(ci, num_results=10, engines=None, resolve_redirects=True, max_results=5):
     """在多个搜索引擎上搜索并合并去重
 
     Args:
@@ -333,5 +333,5 @@ def find_enternet(ci, num_results=10, engines=None, resolve_redirects=True, max_
 
 
 if __name__ == "__main__":
-    result = find_enternet("python", max_results=5)
+    result = find_internet("python", max_results=5)
     print(result)

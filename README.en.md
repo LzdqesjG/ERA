@@ -27,7 +27,7 @@ ERA Terminal/
 ├── coAI.py            # Main entry (terminal interaction + HTTP server + task scheduler)
 ├── yvyin.py           # Voice recognition library (FunASR wrapper)
 ├── user_tools.py      # Tool definitions (custom tools + notes + scheduled task tools)
-├── findenternet.py    # Multi-engine parallel web search
+├── findinternet.py    # Multi-engine parallel web search
 ├── AIconfig.json      # AI configuration (auto-generated)
 ├── history.json       # Conversation history (auto-generated)
 ├── log.log            # Runtime logs (auto-generated)
@@ -230,8 +230,8 @@ Restart `coAI.py` to automatically load the new tool.
 | `search_in_file` | Search for lines containing a keyword in a file |
 | `get_system_info` | Get OS, Python version, and other system info |
 | `find_file` | Find a specific file in a directory |
-| `find_from_enternet` | Search the internet (parallel multi-engine) |
-| `see_enternet` | View contents of a specified URL |
+| `find_from_internet` | Search the internet (parallel multi-engine) |
+| `see_internet` | View contents of a specified URL |
 | `download_file` | Download a file to a specified path |
 | `get_notes` | Get all recorded notes |
 | `set_notes` | Append a new line to notes |
@@ -333,7 +333,7 @@ ECA.py Shell ──→ coAI.py Terminal/HTTP ──→ AI.py AIChat ──→ De
                                       │
                     ┌────────┬────────┼────────┬────────┐
                     │        │        │        │        │
-              user_tools  yvyin  findenternet  Notes  Scheduler
+              user_tools  yvyin  findinternet  Notes  Scheduler
               (file/cmd)  (voice)  (web search) (r/w)  (tasks)
 ```
 

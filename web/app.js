@@ -504,6 +504,11 @@
   }
 
   function handleStreamChunk(rawChunk) {
+    // 内部控制帧：__ctl__<JSON>
+    if (typeof rawChunk === 'string' && rawChunk.startsWith('__ctl__')) {
+      _handleCtlFrame(rawChunk);
+      return;
+    }
     let chunk = rawChunk;
     try {
       const o = JSON.parse(rawChunk);
@@ -513,6 +518,8 @@
             replaceCurrentAiWithFolded(o.reasoning || '', o.content || '');
           }
         } else if (o.__sse_type === 'block') {
+          // 待审查块由本 block 完整重渲染（含结果），先清掉避免重复
+          _removeAllPendingBlocks();
           if (currentAi && currentAi.parentNode) currentAi.parentNode.removeChild(currentAi);
           addAssistantBlock(o.reasoning || '', o.content || '', o.tool_calls || []);
           currentAi = null;
@@ -521,6 +528,11 @@
       }
       if (o && typeof o.text === 'string') {
         chunk = o.text;
+        // 兜底：如果 text 字段里其实塞着 __ctl__ 帧，也直接处理（兼容后端老格式）
+        if (typeof chunk === 'string' && chunk.startsWith('__ctl__')) {
+          _handleCtlFrame(chunk);
+          return;
+        }
       }
     } catch (_) {}
 
@@ -532,6 +544,15 @@
     }
     currentAi.textContent += chunk;
     msgbox.scrollTop = msgbox.scrollHeight;
+  }
+
+  function _handleCtlFrame(rawCtl) {
+    const payload = rawCtl.slice(7);
+    let ctl = null;
+    try { ctl = JSON.parse(payload); } catch (_) { return; }
+    if (ctl && ctl.type === 'tool_request') {
+      handleToolRequestEvent(ctl);
+    }
   }
 
   function connectStream() {
@@ -974,9 +995,14 @@
       balanceBarEl.style.display = 'flex';
       balanceBarEl.classList.remove('err');
       if (d.ok) {
-        const bal = d.balance || '0';
-        const cur = d.currency || '';
-        balanceValueEl.textContent = bal + ' ' + cur;
+        // 支持多币种（如 CNY + USD），用新 balances 字段，无则兜底第一项
+        let arr = Array.isArray(d.balances) && d.balances.length ? d.balances
+          : [{ total_balance: d.balance || '0', currency: d.currency || '' }];
+        balanceValueEl.textContent = arr
+          .map(function (item) {
+            return (item.total_balance || '0') + ' ' + (item.currency || '');
+          })
+          .join(' + ');
       } else {
         balanceBarEl.classList.add('err');
         balanceValueEl.textContent = '查询失败';
@@ -988,17 +1014,245 @@
   }
   window.refreshBalance = refreshBalance;
 
-  // 启动
-  (async function init() {
+  // ===== 工具调用确认（内联在消息流中：待审查工具调用块）=====
+  // pending 请求 id -> { div, name, argsStr }
+  const _pendingToolBlocks = new Map();
+
+  function _argsText(args) {
+    try { return JSON.stringify(args); }
+    catch (_) { return String(args); }
+  }
+
+  // 插入一个"待审查"工具调用块到消息流末尾（默认展开，带批准/拒绝按钮）
+  function _appendPendingToolBlock(ctl) {
+    const id = ctl.id;
+    if (_pendingToolBlocks.has(id)) return;
+    const name = ctl.name || '?';
+    const argsStr = _argsText(ctl.args);
+    const div = document.createElement('div');
+    div.className = 'msg ai';
+    div.setAttribute('data-pending-id', id);
+    div.innerHTML =
+      '<div class="ai-tools">' +
+        '<details class="toolcall pending" open>' +
+          '<summary>' +
+            '<span class="tc-arrow" style="display:inline-block;width:12px;">▼</span> ' +
+            '调用工具: <b>' + escapeHtml(name) + '</b> <span class="tc-tag">待审查</span>' +
+          '</summary>' +
+          '<div class="tc-body">' +
+            '<div class="tc-cmd">$ ' + escapeHtml(name) + '(' + escapeHtml(argsStr) + ')</div>' +
+            '<div class="tc-actions">' +
+              '<button class="tc-btn tc-accept" data-tap-accept="' + escapeHtml(id) + '">批准</button>' +
+              '<button class="tc-btn tc-revoke" data-tap-revoke="' + escapeHtml(id) + '">拒绝</button>' +
+            '</div>' +
+          '</div>' +
+        '</details>' +
+      '</div>';
+    msgbox.appendChild(div);
+    msgbox.scrollTop = msgbox.scrollHeight;
+    _pendingToolBlocks.set(id, { div: div, name: name, argsStr: argsStr });
+    // 展开/收起箭头：与普通工具调用一致 ▼/▶
+    const det = div.querySelector('details.toolcall');
+    const arrow = det.querySelector('.tc-arrow');
+    if (arrow) det.addEventListener('toggle', function () {
+      arrow.textContent = det.open ? '▼' : '▶';
+    });
+    // 批准/拒绝按钮
+    const accBtn = div.querySelector('[data-tap-accept]');
+    const revBtn = div.querySelector('[data-tap-revoke]');
+    if (accBtn) accBtn.addEventListener('click', function () { doAcceptTool(id, 'accept'); });
+    if (revBtn) revBtn.addEventListener('click', function () { doAcceptTool(id, 'revoke'); });
+  }
+
+  // 批准后：按钮区变为"已批准，执行中…"
+  function _markPendingAccepted(id) {
+    const entry = _pendingToolBlocks.get(id);
+    if (!entry) return;
+    const acts = entry.div.querySelector('.tc-actions');
+    if (acts) acts.innerHTML = '<span class="tc-waiting">✓ 已批准，执行中…</span>';
+  }
+
+  // 拒绝后：按钮区变为"已拒绝"并显示取消结果（保留 data-pending-id，等 block 覆盖避免重复渲染）
+  function _markPendingRevoked(id) {
+    const entry = _pendingToolBlocks.get(id);
+    if (!entry) return;
+    const acts = entry.div.querySelector('.tc-actions');
+    if (acts) acts.innerHTML = '<span class="tc-waiting">✕ 已拒绝</span>';
+    const body = entry.div.querySelector('.tc-body');
+    if (body && !body.querySelector('.tc-res')) {
+      const res = document.createElement('div');
+      res.className = 'tc-res';
+      res.textContent = '> (用户手动取消了该工具调用请求)';
+      body.appendChild(res);
+    }
+  }
+
+  // block 事件到来时：清掉所有待审查块（其内容会被 block 完整重渲染，避免重复）
+  function _removeAllPendingBlocks() {
+    document.querySelectorAll('.msg.ai[data-pending-id]').forEach(function (el) { el.remove(); });
+    _pendingToolBlocks.clear();
+  }
+
+  async function doAcceptTool(id, state) {
+    if (!id) return;
+    // 乐观更新：立即反馈；SSE accepted/revoked 事件会再做最终态处理
+    if (state === 'accept') _markPendingAccepted(id);
+    else if (state === 'revoke') _markPendingRevoked(id);
+    try {
+      const r = await fetch('/api/accept_tool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: id, state: state })
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        addMsg('操作工具批准失败: ' + (d && d.error ? d.error : r.statusText), 'sys');
+      }
+    } catch (e) {
+      addMsg('操作工具批准出错: ' + e, 'sys');
+    }
+  }
+
+  function handleToolRequestEvent(ctl) {
+    // ctl: {type:"tool_request", id, name, args, state:"pending|accepted|revoked", ...}
+    if (!ctl || !ctl.id) return;
+    if (ctl.state === 'pending') {
+      _appendPendingToolBlock(ctl);
+    } else if (ctl.state === 'accepted') {
+      _markPendingAccepted(ctl.id);
+    } else if (ctl.state === 'revoked') {
+      _markPendingRevoked(ctl.id);
+    }
+  }
+
+  // ===== 登录鉴权 =====
+  const loginOverlay = document.getElementById('loginOverlay');
+  const loginUserInput = document.getElementById('loginUser');
+  const loginPassInput = document.getElementById('loginPass');
+  const loginErrorEl = document.getElementById('loginError');
+  const loginSubmitBtn = document.getElementById('loginSubmit');
+  const sidebarUserEl = document.getElementById('sidebarUser');
+  const userNameEl = document.getElementById('userName');
+  const logoutBtn = document.getElementById('logoutBtn');
+
+  let _booted = false;  // 防止重复初始化
+
+  function showLogin(errMsg) {
+    if (!loginOverlay) return;
+    loginOverlay.style.display = 'flex';
+    if (loginErrorEl) loginErrorEl.textContent = errMsg || '';
+    if (loginUserInput) { loginUserInput.value = ''; loginUserInput.focus(); }
+    if (loginPassInput) loginPassInput.value = '';
+  }
+  function hideLogin() {
+    if (loginOverlay) loginOverlay.style.display = 'none';
+  }
+  function renderUser(username) {
+    // username 为 null 表示未启用登录，隐藏用户栏
+    if (!sidebarUserEl || !userNameEl) return;
+    if (!username) { sidebarUserEl.style.display = 'none'; return; }
+    sidebarUserEl.style.display = 'flex';
+    userNameEl.textContent = username;
+    userNameEl.title = username;
+  }
+
+  // 正常初始化（已登录或无需登录时调用）
+  async function bootApp() {
+    if (_booted) return;
+    _booted = true;
     initSidebarPref();
     await loadConvList();
     await loadHistory();
-    refreshBalance();  // 启动时查一次（非 DeepSeek 会自动隐藏）
+    refreshBalance();
     try {
       const r = await fetch('/api/status');
       const s = await r.json();
       if (s.web_mode) connectStream();
       else addMsg('终端未进入 web 模式，当前为同步请求模式（在终端输入 web 可切换）', 'sys');
     } catch (e) {}
-  })();
+  }
+
+  // 启动入口：先查登录状态
+  async function start() {
+    let me = null;
+    try {
+      const r = await fetch('/api/me');
+      me = await r.json();
+    } catch (e) {
+      me = null;
+    }
+    if (me && me.auth_enabled && !me.username) {
+      // 需要登录
+      showLogin();
+      return;
+    }
+    // 已登录 或 未启用登录
+    renderUser(me && me.username);
+    await bootApp();
+  }
+
+  // 登录提交
+  async function doLogin() {
+    if (loginErrorEl) loginErrorEl.textContent = '';
+    if (loginSubmitBtn) { loginSubmitBtn.classList.add('saving'); loginSubmitBtn.disabled = true; }
+    const u = (loginUserInput ? loginUserInput.value : '').trim();
+    const p = loginPassInput ? loginPassInput.value : '';
+    if (!u || !p) {
+      if (loginErrorEl) loginErrorEl.textContent = '请输入用户名和密码';
+      if (loginSubmitBtn) { loginSubmitBtn.classList.remove('saving'); loginSubmitBtn.disabled = false; }
+      return;
+    }
+    try {
+      const r = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p })
+      });
+      const d = await r.json();
+      if (r.ok && d.ok) {
+        hideLogin();
+        renderUser(d.username);
+        // 重置 boot 标记后启动主应用
+        _booted = false;
+        await bootApp();
+      } else {
+        if (loginErrorEl) loginErrorEl.textContent = d.error || '登录失败';
+      }
+    } catch (e) {
+      if (loginErrorEl) loginErrorEl.textContent = '网络错误：' + e;
+    } finally {
+      if (loginSubmitBtn) { loginSubmitBtn.classList.remove('saving'); loginSubmitBtn.disabled = false; }
+    }
+  }
+  window.doLogin = doLogin;
+
+  // 回车提交登录
+  if (loginPassInput) {
+    loginPassInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); doLogin(); }
+    });
+  }
+  if (loginUserInput) {
+    loginUserInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault();
+        if (loginPassInput) loginPassInput.focus(); }
+    });
+  }
+
+  // 退出登录
+  async function doLogout() {
+    try {
+      await fetch('/api/logout', { method: 'POST' });
+    } catch (e) {}
+    // 清空界面状态
+    _booted = false;
+    if (es) { try { es.close(); } catch (_) {} es = null; }
+    if (msgbox) msgbox.innerHTML = '';
+    renderUser(null);
+    showLogin();
+  }
+  if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+
+  // 启动
+  start();
 })();

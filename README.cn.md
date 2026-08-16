@@ -27,7 +27,7 @@ ERA终端/
 ├── coAI.py            # 主入口（终端交互 + HTTP 服务器 + 定时任务调度器）
 ├── yvyin.py           # 语音识别库（FunASR 封装）
 ├── user_tools.py      # 工具定义文件（用户自定义工具 + 笔记 + 定时任务工具）
-├── findenternet.py    # 多引擎并行网络搜索
+├── findinternet.py    # 多引擎并行网络搜索
 ├── AIconfig.json      # AI 配置文件（自动生成）
 ├── history.json       # 对话历史（自动生成）
 ├── log.log            # 运行日志（自动生成）
@@ -230,8 +230,8 @@ def get_tools():
 | `search_in_file` | 在文件中搜索包含关键词的行 |
 | `get_system_info` | 获取操作系统、Python 版本等信息 |
 | `find_file` | 在指定目录下查找文件 |
-| `find_from_enternet` | 在互联网上搜索信息（三引擎并行） |
-| `see_enternet` | 查看指定网址的内容 |
+| `find_from_internet` | 在互联网上搜索信息（三引擎并行） |
+| `see_internet` | 查看指定网址的内容 |
 | `download_file` | 下载指定文件到指定路径 |
 | `get_notes` | 获取记录的笔记 |
 | `set_notes` | 在笔记中记录新的一行 |
@@ -333,7 +333,7 @@ ECA.py 外壳 ──→ coAI.py 终端/HTTP ──→ AI.py AIChat ──→ Dee
                                       │
                     ┌────────┬────────┼────────┬────────┐
                     │        │        │        │        │
-              user_tools  yvyin  findenternet  笔记  定时任务
+              user_tools  yvyin  findinternet  笔记  定时任务
               (文件/命令)  (语音)  (网络搜索)  (读写)  (调度器)
 ```
 

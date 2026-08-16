@@ -46,7 +46,7 @@ def _is_deepseek(base_url):
     return _normalize_base_url(base_url) == "https://api.deepseek.com"
 
 
-def query_balance(api_key, base_url, timeout=8):
+def query_balance(api_key, base_url, timeout=8): 
     """查询 DeepSeek 余额。仅当 base_url 为 api.deepseek.com 时有效。
     返回 {"ok": bool, "balance": "19.48", "currency": "CNY", "raw": {...}} 或 {"ok": False, "error": "..."}
     """
@@ -78,13 +78,32 @@ def query_balance(api_key, base_url, timeout=8):
     infos = data.get("balance_infos") or []
     if not infos:
         return {"ok": False, "error": "未返回余额信息", "supported": True, "raw": data}
-    info = infos[0]
+    # 规范化所有币种信息（完整列表，支持多项如 CNY + USD）
+    normalized = []
+    for _i in infos:
+        if not isinstance(_i, dict):
+            continue
+        _tb = str(_i.get("total_balance") or "").strip()
+        _cu = str(_i.get("currency") or "").strip()
+        if not _tb:
+            continue
+        normalized.append({
+            "total_balance": _tb,
+            "currency": _cu,
+            "granted_balance": str(_i.get("granted_balance") or ""),
+            "topped_up_balance": str(_i.get("topped_up_balance") or ""),
+        })
+    if not normalized:
+        return {"ok": False, "error": "余额信息为空", "supported": True, "raw": data}
+    first = normalized[0]
     return {
         "ok": True,
-        "balance": str(info.get("total_balance") or ""),
-        "currency": str(info.get("currency") or ""),
-        "granted_balance": str(info.get("granted_balance") or ""),
-        "topped_up_balance": str(info.get("topped_up_balance") or ""),
+        # 兼容旧字段：取第一项
+        "balance": first["total_balance"],
+        "currency": first["currency"],
+        "granted_balance": first["granted_balance"],
+        "topped_up_balance": first["topped_up_balance"],
+        "balances": normalized,  # 完整列表：前端用它拼 "X CNY + Y USD"
         "raw": data,
     }
 
@@ -124,7 +143,8 @@ _MIME = {
 # ============================================================
 def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None,
                  is_web_mode_fn=None, web_input_queue=None, web_output_queue=None,
-                 history_path=None, conv_manager=None, config_path=None):
+                 history_path=None, conv_manager=None, config_path=None,
+                 tool_accept_manager=None):
     """
     is_web_mode_fn:  无参回调，返回当前是否 web 模式
     web_input_queue: 网页提交的输入队列（web 模式由主循环消费）
@@ -132,6 +152,7 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
     history_path:    history.json 的路径；None 时按常见位置兜底搜索（仅 conv_manager=None 时使用）
     conv_manager:    ConversationManager 实例（启用多会话后，/api/convs 系列 + history 都走它）
     config_path:     AIconfig.json 路径（用于 /api/config 读写）
+    tool_accept_manager: ToolAcceptManager 实例（AI 工具调用批准/拒绝）
     """
     import os as _os
 
@@ -187,6 +208,59 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
                 })
         return out
 
+    # ============================================================
+    # 登录鉴权（基于 AIconfig.json 的 web_username / web_password）
+    # - 两者都配置时启用登录；未配置则开放访问（兼容用户尚未配置的情况）
+    # - 登录成功生成随机 token，存内存 set；通过 Cookie era_token 携带
+    # ============================================================
+    import secrets as _secrets
+    _valid_tokens = set()  # 已登录的有效 token
+
+    def _load_config_dict():
+        cp = config_path
+        if not cp:
+            cp = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "AIconfig.json")
+        try:
+            with open(cp, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception:
+            return {}
+
+    def _auth_credentials():
+        cfg = _load_config_dict()
+        u = (cfg.get("web_username") or "").strip()
+        p = (cfg.get("web_password") or "")
+        return u, p
+
+    def _auth_enabled():
+        u, p = _auth_credentials()
+        return bool(u and p)
+
+    def _parse_cookies_handler(h):
+        raw = h.headers.get("Cookie") or ""
+        d = {}
+        for part in raw.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                d[k.strip()] = v.strip()
+        return d
+
+    def _is_authed(h):
+        if not _auth_enabled():
+            return True  # 未配置登录：开放访问
+        token = _parse_cookies_handler(h).get("era_token", "")
+        return bool(token and token in _valid_tokens)
+
+    def _current_username(h):
+        """返回当前登录用户名；未启用登录返回 None，未登录返回 None"""
+        if not _auth_enabled():
+            return None
+        token = _parse_cookies_handler(h).get("era_token", "")
+        if token and token in _valid_tokens:
+            return _auth_credentials()[0]
+        return None
+
     class WebHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             if log is not None:
@@ -233,8 +307,24 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
                 if ext in _MIME and os.path.isfile(os.path.join(_WEB_DIR, fname)):
                     self._send(_read_static(fname), 200, _MIME[ext])
                     return
+            # ---- /api/me：返回登录状态（无需鉴权，前端据此决定是否显示登录页）----
+            if path == "/api/me":
+                self._send_json({
+                    "auth_enabled": _auth_enabled(),
+                    "username": _current_username(self),
+                })
+                return
+            # ---- 其余 /api/* 需要登录鉴权 ----
+            if path.startswith("/api/") and not _is_authed(self):
+                self._send_json({"error": "未登录", "need_login": True}, 401)
+                return
             if path == "/api/status":
                 self._send_json({"web_mode": self._in_web_mode()})
+                return
+            if path == "/api/pending_tools":
+                # 当前等待用户批准的工具请求列表
+                pending = tool_accept_manager.list_pending() if tool_accept_manager else []
+                self._send_json({"pending": pending})
                 return
             if path == "/api/conversations" or path == "/api/convs":
                 # 列出所有会话
@@ -244,20 +334,30 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
                     self._send_json({"conversations": conv_manager.list_conversations()})
                 return
             if path == "/api/conversations/current" or path == "/api/convs/current":
-                # 返回当前会话完整信息（含 messages 已归一化）
+                # 返回当前会话完整信息（含 messages 已归一化）；如当前无会话返回 id=null
                 if conv_manager is None:
                     self._send_json({"error": "多会话未启用"}, 503)
                 else:
                     try:
                         conv = conv_manager.current()
-                        msgs = _normalize_messages_for_frontend(conv.get("messages") or [])
-                        self._send_json({
-                            "id": conv.get("id"),
-                            "title": conv.get("title"),
-                            "created_at": conv.get("created_at"),
-                            "updated_at": conv.get("updated_at"),
-                            "messages": msgs,
-                        })
+                        if conv is None:
+                            # 还没有任何会话：告诉前端继续保持空白，不建新
+                            self._send_json({
+                                "id": None,
+                                "title": None,
+                                "created_at": None,
+                                "updated_at": None,
+                                "messages": [],
+                            })
+                        else:
+                            msgs = _normalize_messages_for_frontend(conv.get("messages") or [])
+                            self._send_json({
+                                "id": conv.get("id"),
+                                "title": conv.get("title"),
+                                "created_at": conv.get("created_at"),
+                                "updated_at": conv.get("updated_at"),
+                                "messages": msgs,
+                            })
                     except Exception as e:
                         self._send_json({"error": str(e)}, 500)
                 return
@@ -266,10 +366,15 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
                 if conv_manager is not None:
                     try:
                         conv = conv_manager.current()
-                        msgs = _normalize_messages_for_frontend(conv.get("messages") or [])
-                        self._send_json({"messages": msgs, "loaded": True,
-                                         "conv_id": conv.get("id"),
-                                         "conv_title": conv.get("title")})
+                        if conv is None:
+                            # 还没有任何会话，返回空数组，不建空对话
+                            self._send_json({"messages": [], "loaded": True,
+                                             "conv_id": None, "conv_title": None})
+                        else:
+                            msgs = _normalize_messages_for_frontend(conv.get("messages") or [])
+                            self._send_json({"messages": msgs, "loaded": True,
+                                             "conv_id": conv.get("id"),
+                                             "conv_title": conv.get("title")})
                     except Exception as e:
                         self._send_json({"messages": [], "loaded": False, "error": str(e)}, 500)
                     return
@@ -362,10 +467,13 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
             while True:
                 try:
                     msg = q.get(timeout=15)
-                    # 支持两种入队内容：
+                    # 支持三种入队内容：
                     # 1) 纯文本：_WebTee 推过来的 stdout 碎片 -> 包成 {type:"text",text}
                     # 2) 已带 __sse_type 的控制帧 JSON 字符串 -> 直接原样发（chat_with_ai 直接入队）
-                    if isinstance(msg, str) and msg.startswith("{") and "\"__sse_type\"" in msg \
+                    # 3) __ctl__ 前缀的工具批准控制帧 -> 直接原样发（前端会识别 __ctl__ 前缀）
+                    if isinstance(msg, str) and msg.startswith("__ctl__"):
+                        payload = msg
+                    elif isinstance(msg, str) and msg.startswith("{") and "\"__sse_type\"" in msg \
                             and msg.rstrip().endswith("}"):
                         # 已是结构化控制帧 JSON：直接用（仍兼容解析时 __sse_type 字段）
                         payload = msg
@@ -395,6 +503,77 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
             except (TypeError, ValueError):
                 length = 0
             raw_body = self.rfile.read(length) if length > 0 else b""
+
+            # ---- POST /api/login：校验账号密码，签发 token 并写入 Cookie ----
+            if path == "/api/login":
+                try:
+                    payload = json.loads(raw_body.decode("utf-8") or "{}")
+                except Exception:
+                    payload = {}
+                u_in = (payload.get("username") or "").strip()
+                p_in = payload.get("password") or ""
+                if not _auth_enabled():
+                    self._send_json({"error": "服务端未配置登录账号，无需登录"}, 400)
+                    return
+                u_cfg, p_cfg = _auth_credentials()
+                # 用比较时长度无关的校验，避免简单时序差异（本地工具，近似即可）
+                if u_in == u_cfg and p_in == p_cfg:
+                    token = _secrets.token_hex(24)
+                    _valid_tokens.add(token)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Set-Cookie",
+                                     f"era_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"ok": True, "username": u_cfg},
+                                                ensure_ascii=False).encode("utf-8"))
+                else:
+                    self._send_json({"error": "用户名或密码错误"}, 401)
+                return
+
+            # ---- POST /api/logout：注销当前 token ----
+            if path == "/api/logout":
+                token = _parse_cookies_handler(self).get("era_token", "")
+                if token:
+                    _valid_tokens.discard(token)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                # 清除 Cookie
+                self.send_header("Set-Cookie",
+                                 "era_token=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+                self.end_headers()
+                self.wfile.write(json.dumps({"ok": True}, ensure_ascii=False).encode("utf-8"))
+                return
+
+            # ---- 其余 /api/* 需要登录鉴权 ----
+            if path.startswith("/api/") and not _is_authed(self):
+                self._send_json({"error": "未登录", "need_login": True}, 401)
+                return
+
+            # ---- POST /api/accept_tool：批准 / 拒绝工具调用请求 ----
+            if path == "/api/accept_tool":
+                if tool_accept_manager is None:
+                    self._send_json({"error": "工具确认机制未启用"}, 503)
+                    return
+                try:
+                    payload = json.loads(raw_body.decode("utf-8") or "{}")
+                except Exception:
+                    payload = {}
+                rid = str(payload.get("id") or "").strip()
+                state = str(payload.get("state") or "").strip().lower()
+                if not rid:
+                    self._send_json({"error": "缺少请求 id"}, 400)
+                    return
+                if state not in ("accept", "revoke"):
+                    self._send_json({"error": "state 必须为 accept 或 revoke"}, 400)
+                    return
+                try:
+                    ok = tool_accept_manager.resolve(rid, state)
+                except ValueError as e:
+                    self._send_json({"error": str(e)}, 400)
+                    return
+                self._send_json({"ok": True, "matched": bool(ok)})
+                return
 
             # ---- 会话 CRUD（多会话模式下） ----
             if conv_manager is not None:
@@ -461,12 +640,17 @@ def make_handler(*, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None
                             if save_history_fn:
                                 try: save_history_fn()
                                 except Exception: pass
-                        # 返回新的当前会话
+                        # 返回新的当前会话（可能无，id=None）
                         curr = conv_manager.current()
-                        msgs = _normalize_messages_for_frontend(curr.get("messages") or [])
+                        if curr is None:
+                            curr_id, curr_title, msgs = None, None, []
+                        else:
+                            curr_id = curr.get("id")
+                            curr_title = curr.get("title")
+                            msgs = _normalize_messages_for_frontend(curr.get("messages") or [])
                         self._send_json({"ok": True,
-                                         "current_id": curr.get("id"),
-                                         "current_title": curr.get("title"),
+                                         "current_id": curr_id,
+                                         "current_title": curr_title,
                                          "messages": msgs,
                                          "conversations": conv_manager.list_conversations()})
                     except ValueError as e:
@@ -669,7 +853,8 @@ class _ReusableServer(socketserver.ThreadingTCPServer):
 
 def start_server(port, *, ai, lock, chat_fn, save_history_fn, scheduler=None, log=None,
                  is_web_mode_fn=None, web_input_queue=None, web_output_queue=None,
-                 history_path=None, conv_manager=None, config_path=None):
+                 history_path=None, conv_manager=None, config_path=None,
+                 tool_accept_manager=None):
     """启动网页 + API 服务器。阻塞调用，应放在 daemon 线程里。"""
     Handler = make_handler(
         ai=ai, lock=lock, chat_fn=chat_fn,
@@ -680,6 +865,7 @@ def start_server(port, *, ai, lock, chat_fn, save_history_fn, scheduler=None, lo
         history_path=history_path,
         conv_manager=conv_manager,
         config_path=config_path,
+        tool_accept_manager=tool_accept_manager,
     )
     with _ReusableServer(("", port), Handler) as httpd:
         if log is not None:

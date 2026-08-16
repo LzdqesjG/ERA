@@ -33,17 +33,19 @@
 
 import os
 import sys
+import struct
 import subprocess
 from datetime import datetime
 import requests
 import json
+from web import query_balance
 
 # 可选依赖：缺失时只跳过对应工具，不影响核心工具加载
-# （Windows 不支持 crypt；findenternet 依赖 bs4；easygui/lzdqesj 可能未安装）
+# （Windows 不支持 crypt；findinternet 依赖 bs4；easygui/lzdqesj 可能未安装）
 try:
-    from findenternet import find_enternet
+    from findinternet import find_internet
 except Exception:
-    find_enternet = None
+    find_internet = None
 try:
     import lzdqesj
 except Exception:
@@ -59,6 +61,18 @@ try:
         config = json.load(f)
 except FileNotFoundError:
     pass
+
+
+def tool_need_accept(func):
+    """装饰器：标记该工具在被 AI 调用前需要用户手动批准。
+    用法：
+        @tool_need_accept
+        def _dangerous_tool(args): ...
+    该装饰器会在 handler 上加 `__tool_need_accept__ = True` 属性。
+    """
+    func.__tool_need_accept__ = True
+    return func
+
 
 
 # ================================================
@@ -80,6 +94,7 @@ def _read_file(args):
     except Exception as e:
         return f"读取文件出错: {str(e)}"
 
+@tool_need_accept
 def _write_file(args):
     """将内容写入指定文件"""
     filepath = args.get("path", "")
@@ -110,6 +125,7 @@ def _list_files(args):
     except Exception as e:
         return f"列出文件出错: {str(e)}"
 
+@tool_need_accept
 def _run_command(args):
     """执行系统命令并返回输出"""
     cmd = args.get("command", "")
@@ -165,6 +181,97 @@ def _get_system_info(args):
 # 自定义工具 —— 在这里添加你自己的工具
 # ================================================
 
+# ---- Everything 全局文件搜索（基于 es.exe 命令行工具）----
+def _get_es_exe():
+    """根据 Python 进程位数选择合适的 es.exe；找不到时兜底扫描 es 目录。"""
+    es_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "es")
+    bits = struct.calcsize("P") * 8
+    if bits == 64:
+        candidates = ["es-x64.exe", "es-arm64.exe", "es-x86.exe", "es-arm.exe"]
+    else:
+        candidates = ["es-x86.exe", "es-arm.exe", "es-x64.exe", "es-arm64.exe"]
+    for name in candidates:
+        p = os.path.join(es_dir, name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(es_dir, "es-x64.exe")  # 返回默认路径（即便不存在，调用时报错）
+
+def everything_search_tool(args):
+    """使用 Everything 在系统全局范围快速查找文件/文件夹。
+    依赖 Everything 服务（需安装并运行 Everything）。
+    注意：Everything 仅支持 Windows；非 Windows 系统会返回不可用提示。
+    """
+    keyword = args.get("keyword", "")
+    if not keyword:
+        return "错误: 未指定搜索关键词"
+
+    # 跨平台：Everything 为 Windows 专属，非 Windows 直接告知
+    if sys.platform != "win32":
+        return ("⚠️ Everything 文件搜索仅支持 Windows 系统，当前系统为 "
+                f"{sys.platform}，无法使用。\n"
+                "建议：非 Windows 可改用 list_files 按目录浏览，或 run_command 执行 "
+                "'find / -name <关键词>'（Linux/macOS）进行搜索。")
+
+    # 结果数量限制（1~500，默认 50）
+    max_results = args.get("max_results", 50)
+    try:
+        max_results = int(max_results)
+    except (ValueError, TypeError):
+        max_results = 50
+    max_results = max(1, min(500, max_results))
+
+    search_path = args.get("path", "") or ""
+    folders_only = bool(args.get("folders_only", False))
+    show_size = bool(args.get("show_size", True))
+    show_date = bool(args.get("show_date", False))
+
+    exe = _get_es_exe()
+    if not os.path.isfile(exe):
+        return ("错误: 未找到 es.exe 命令行工具，请确认项目下 es 目录存在且包含 es-x64.exe/es-x86.exe\n"
+                f"查找路径: {exe}")
+
+    # 用列表传参，避免 shell 注入风险；搜索词作为最后一个位置参数
+    cmd = [exe, "-n", str(max_results), "-s"]
+    if search_path:
+        cmd += ["-path", search_path]
+    if folders_only:
+        cmd.append("/ad")
+    if show_size:
+        cmd.append("-size")
+    if show_date:
+        cmd.append("-dm")
+    cmd.append(keyword)
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return "搜索超时 (15秒)，Everything 服务可能未运行或无响应"
+    except FileNotFoundError:
+        return f"错误: 无法启动 es.exe ({exe})"
+    except Exception as e:
+        return f"搜索出错: {str(e)}"
+
+    # es.exe 带 -utf8 选项时输出 UTF-8
+    out = result.stdout.decode("utf-8", errors="replace").strip()
+    err = result.stderr.decode("utf-8", errors="replace").strip()
+
+    if result.returncode != 0:
+        tip = "请确认 Everything 已安装且服务正在运行"
+        return f"搜索失败 (exit={result.returncode}): {err or out or '无输出'}\n提示: {tip}"
+
+    if not out:
+        return f"未找到匹配 '{keyword}' 的文件"
+
+    lines = out.splitlines()
+    header = f"找到 {len(lines)} 个结果"
+    if len(lines) >= max_results:
+        header += f"（已限制为前 {max_results} 条，可能还有更多）"
+    header += "：\n"
+    return header + out
+
+
 def find_file_tool(args):
     """在指定目录下查找指定文件"""
     path = args.get("path", "")
@@ -185,14 +292,14 @@ def find_file_tool(args):
     except Exception as e:
         return f"查找文件出错: {str(e)}"
 
-def find_enternet_tool(args):
+def find_internet_tool(args):
     """在多个搜索引擎上搜索并合并去重"""
     ci = args.get("ci", "")
     num_results = args.get("num_results", 10)
     engines = args.get("engines", None)
     resolve_redirects = args.get("resolve_redirects", True)
     max_results = args.get("max_results", 5)
-    return find_enternet(ci, num_results, engines, resolve_redirects, max_results)
+    return find_internet(ci, num_results, engines, resolve_redirects, max_results)
 
 def find_url_tool(args):
     """查看指定网址的内容"""
@@ -205,6 +312,7 @@ def find_url_tool(args):
     except Exception as e:
         return f"查看网址出错: {str(e)}"
 
+@tool_need_accept
 def download_file_tool(args):
     """下载指定文件到指定路径"""
     url = args.get("url", "")
@@ -249,6 +357,7 @@ def set_notes_tool(args):
     except Exception as e:
         return f"记录笔记出错: {str(e)}"
 
+@tool_need_accept
 def clear_notes_tool(args=None):
     """清除记录的笔记"""
     notes_path = config.get("notes_path", "")
@@ -261,6 +370,7 @@ def clear_notes_tool(args=None):
     except Exception as e:
         return f"清除笔记出错: {str(e)}"
 
+@tool_need_accept
 def rewrite_notes_tool(args):
     """重写所有的笔记"""
     notes_path = config.get("notes_path", "")
@@ -274,6 +384,7 @@ def rewrite_notes_tool(args):
     except Exception as e:
         return f"重写笔记出错: {str(e)}"
 
+@tool_need_accept
 def remove_notes_tool(args):
     """删除指定行的笔记"""
     index = args.get("index", "")
@@ -332,6 +443,7 @@ def get_time_tasks_tool(args=None):
     return "\n".join(lines)
 
 
+@tool_need_accept
 def add_time_task_tool(args):
     """添加一个定时任务（立刻生效并启动线程）"""
     global _scheduler
@@ -365,6 +477,7 @@ def add_time_task_tool(args):
         return f"添加定时任务出错: {e}"
 
 
+@tool_need_accept
 def remove_time_task_tool(args):
     """删除指定定时任务（索引或id），并自动停止其线程"""
     global _scheduler
@@ -401,8 +514,9 @@ def remove_time_task_tool(args):
     except Exception as e:
         return f"删除定时任务出错: {e}"
 
+@tool_need_accept
 def _rickroll_tool(args):
-    """播放rickroll视频"""
+    """播放rickroll视频（会弹出浏览器/桌面媒体，需用户批准）"""
     # This tool is made by @lzdqesj
     platform = args.get("type", "")
     if not platform:
@@ -442,8 +556,9 @@ def _get_notify_help_tool(kwargs):
 
 
 
+@tool_need_accept
 def _show_notify_tool(kwargs):
-    """用 easygui 库显示弹窗"""
+    """用 easygui 库显示弹窗（会打断用户操作）"""
     method = kwargs.get("method", "")
     kwargs = kwargs.get("kwargs", {})
     reval = None
@@ -549,7 +664,24 @@ def get_tools():
             "handler": find_file_tool,
         },
 
-        "see_enternet": {
+        "everything_search": {
+            "description": "使用 Everything 在系统全局范围秒级查找文件/文件夹（比 find_file 快得多，支持全盘搜索）。支持 Everything 搜索语法，如 *.py、ext:exe;ini、path:C:\\Windows、dupe: 等。注意：仅支持 Windows 且需要 Everything 服务正在运行；非 Windows 系统会返回不可用提示",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "搜索关键词，支持 Everything 语法（如 *.py、config.ini、ext:pdf）"},
+                    "max_results": {"type": "integer", "description": "最大返回结果数（1~500，默认50）"},
+                    "path": {"type": "string", "description": "限定搜索的路径（可选）"},
+                    "folders_only": {"type": "boolean", "description": "仅搜索文件夹（默认 false）"},
+                    "show_size": {"type": "boolean", "description": "显示文件大小（默认 true）"},
+                    "show_date": {"type": "boolean", "description": "显示修改日期（默认 false）"}
+                },
+                "required": ["keyword"],
+            },
+            "handler": everything_search_tool,
+        },
+
+        "see_internet": {
             "description": "查看指定网址的内容",
             "parameters": {
                 "type": "object",
@@ -637,8 +769,8 @@ def get_tools():
     }
 
     # ===== 可选工具：依赖未安装时跳过，不影响核心工具加载 =====
-    if find_enternet is not None:
-        tools["find_from_enternet"] = {
+    if find_internet is not None:
+        tools["find_from_internet"] = {
             "description": "在互联网上查找信息",
             "parameters": {
                 "type": "object",
@@ -647,7 +779,7 @@ def get_tools():
                 },
                 "required": ["ci"],
             },
-            "handler": find_enternet_tool,
+            "handler": find_internet_tool,
         }
     if lzdqesj is not None:
         tools["rickroll"] = {

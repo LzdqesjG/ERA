@@ -128,6 +128,29 @@ body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   width: 0; min-width: 0; max-width: 0;
   border-right-color: transparent;
 }
+
+/* 侧边栏顶部：用户信息（置顶，不随列表滚动） */
+.sidebar-user {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--sidebar-border);
+  background: var(--sidebar-active);
+  color: var(--sidebar-active-text);
+}
+.sidebar-user .user-avatar { font-size: 16px; }
+.sidebar-user .user-name {
+  flex: 1; font-size: 13px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sidebar-user .logout-btn {
+  background: transparent; color: inherit;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 5px; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  transition: background .15s;
+}
+.sidebar-user .logout-btn:hover { background: var(--sidebar-hover); }
+
 .sidebar-header {
   display: flex; align-items: center; gap: 6px;
   padding: 10px 10px; border-bottom: 1px solid var(--sidebar-border);
@@ -417,5 +440,69 @@ header button.icon { padding: 5px 9px; font-size: 14px; }
 .settings-note.err { color: #ef4444; }
 #saveSettingsBtn { min-width: 72px; }
 #saveSettingsBtn.saving { opacity: .7; cursor: wait; }
+
+/* ===== 登录遮罩 ===== */
+.login-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+}
+.login-card {
+  width: 340px; max-width: 90vw;
+  background: var(--msg-ai-bg); color: var(--msg-ai-text);
+  border: 1px solid var(--sidebar-border);
+  border-radius: 12px; padding: 32px 28px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.18);
+}
+.login-logo {
+  font-size: 22px; font-weight: 700; text-align: center;
+  color: var(--sidebar-btn-text); background: var(--sidebar-btn-bg);
+  border-radius: 8px; padding: 10px 0;
+}
+.login-sub { text-align: center; font-size: 13px; color: var(--sub-text); margin-bottom: 4px; }
+.login-card input {
+  width: 100%; border: 1px solid var(--inp-border); background: var(--inp-bg);
+  color: var(--inp-text); border-radius: 8px; padding: 10px 12px; font-size: 14px;
+  font-family: inherit;
+}
+.login-card input:focus { outline: none; border-color: var(--inp-focus); }
+.login-error { font-size: 12.5px; color: #ef4444; min-height: 16px; text-align: center; }
+.login-submit {
+  width: 100%; padding: 11px; border: none; cursor: pointer;
+  background: var(--sidebar-btn-bg); color: var(--sidebar-btn-text);
+  border-radius: 8px; font-size: 15px; font-weight: 600; font-family: inherit;
+  transition: filter .15s;
+}
+.login-submit:hover { filter: brightness(1.08); }
+.login-submit:active { filter: brightness(.95); }
+.login-submit.saving { opacity: .7; cursor: wait; }
+
+/* ===== 工具调用待审查（内联在消息流中）===== */
+.toolcall.pending {
+  border: 1px solid #f59e0b;
+  background: color-mix(in srgb, #f59e0b 10%, var(--tool-bg));
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, .25);
+}
+.toolcall.pending > summary { color: #b45309; font-weight: 600; }
+[data-theme="dark"] .toolcall.pending > summary { color: #fbbf24; }
+.tc-tag {
+  display: inline-block; margin-left: 4px; padding: 1px 7px;
+  font-size: 11.5px; font-weight: 700; border-radius: 8px;
+  background: #f59e0b; color: #fff; vertical-align: middle;
+}
+.tc-actions {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px;
+}
+.tc-btn {
+  border: none; border-radius: 7px; padding: 6px 16px; font-size: 13px;
+  cursor: pointer; font-weight: 600; transition: filter .15s;
+}
+.tc-btn:hover { filter: brightness(1.08); }
+.tc-btn:active { filter: brightness(.95); }
+.tc-btn:disabled { opacity: .6; cursor: default; }
+.tc-accept { background: #10b981; color: #fff; }
+.tc-revoke { background: #ef4444; color: #fff; }
+.tc-waiting { font-size: 12.5px; color: var(--muted); }
 
 
